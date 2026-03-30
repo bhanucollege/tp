@@ -14,17 +14,28 @@ app.setPath('userData', userDataPath);
 app.setPath('sessionData', path.join(userDataPath, 'session'));
 
 const fs = require('fs');
-let CENTRAL_SERVER = 'https://shimmerbodylotion-wt.onrender.com'; // Default fallback
+let CENTRAL_SERVER = 'https://tp-00zg.onrender.com'; // Default fallback
+
+function readServerUrlFromConfig(fileName) {
+    try {
+        const configPath = path.join(__dirname, fileName);
+        if (!fs.existsSync(configPath)) return null;
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        return config?.serverUrl || null;
+    } catch {
+        return null;
+    }
+}
 
 // Read central server URL from config if exists
 try {
-    const configPath = path.join(__dirname, '.server-config.json');
-    if (fs.existsSync(configPath)) {
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        if (config.serverUrl) {
-            CENTRAL_SERVER = config.serverUrl;
-            console.log(`[Main] Using central server from config: ${CENTRAL_SERVER}`);
-        }
+    const configured =
+        process.env.CENTRAL_SERVER_URL ||
+        readServerUrlFromConfig('.server-config.json') ||
+        readServerUrlFromConfig('server-config.json');
+    if (configured) {
+        CENTRAL_SERVER = configured;
+        console.log(`[Main] Using central server from config: ${CENTRAL_SERVER}`);
     }
 } catch (err) {
     console.error('[Main] Failed to read .server-config.json:', err.message);
@@ -162,7 +173,11 @@ ipcMain.handle('worker-reply', (event, msgType, data) => {
 
 // ==================== APP LIFECYCLE ====================
 app.whenReady().then(async () => {
-    await startServer();
+    if (process.env.SKIP_LOCAL_SERVER !== '1') {
+        await startServer();
+    } else {
+        console.log('[Main] SKIP_LOCAL_SERVER=1, using deployed server only');
+    }
     createWindow();
     createTray();
 });

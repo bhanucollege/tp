@@ -8,9 +8,10 @@ export const useSocket = () => {
 };
 
 export const SocketProvider = ({ children }) => {
+    const envServerUrl = import.meta.env.VITE_SERVER_URL || null;
     const [socket, setSocket] = useState(null);
     const [connected, setConnected] = useState(false);
-    const [currentUrl, setCurrentUrl] = useState('http://localhost:3000');
+    const [currentUrl, setCurrentUrl] = useState(envServerUrl || 'https://tp-00zg.onrender.com');
     
     // Global state arrays updated directly by socket events
     const [workers, setWorkers] = useState([]);
@@ -44,7 +45,7 @@ export const SocketProvider = ({ children }) => {
                 }
             }
 
-            const candidates = ['http://localhost:3001', 'http://localhost:3000', configuredUrl, 'https://shimmerbodylotion-wt.onrender.com']
+            const candidates = [configuredUrl, envServerUrl, 'https://tp-00zg.onrender.com', 'http://localhost:3001', 'http://localhost:3000']
                 .filter(Boolean);
 
             for (const candidate of candidates) {

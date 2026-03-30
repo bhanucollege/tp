@@ -4,8 +4,8 @@
   "description": "Decentralized Idle Compute Sharing Platform for AI & Research Workloads",
   "main": "main.js",
   "scripts": {
-    "start": "npm run dev",
-    "dev": "start cmd /k npx vite && node wait-and-launch.js",
+    "start": "concurrently -k -n VITE,ELECTRON,WORKER \"npm run vite\" \"node wait-and-launch.js\" \"npm run worker\"",
+    "dev": "concurrently -k -n VITE,ELECTRON \"npm run vite\" \"node wait-and-launch.js\"",
     "vite": "vite",
     "server": "node server.js",
     "worker": "node worker.js",

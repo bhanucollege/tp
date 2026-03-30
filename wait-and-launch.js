@@ -23,7 +23,11 @@ function waitForVite() {
         if (!err) {
             console.log('[Launcher] Vite is ready! Starting Electron...');
             const electronBin = require('path').join(__dirname, 'node_modules', '.bin', 'electron');
-            const child = spawn(electronBin, ['.'], { stdio: 'inherit', shell: true });
+            const child = spawn(electronBin, ['.'], {
+                stdio: 'inherit',
+                shell: true,
+                env: { ...process.env, SKIP_LOCAL_SERVER: '1' }
+            });
             child.on('close', (code) => process.exit(code));
         } else {
             elapsed += POLL_INTERVAL_MS;

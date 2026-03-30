@@ -60,6 +60,39 @@ npm run worker
 
 Then open `http://localhost:3000` in a browser.
 
+## Production Baseline (Central Server + Remote Workers)
+
+Use one shared public base URL across Electron, web clients, and workers.
+
+1. Set server URL in both config files:
+	- `.server-config.json`
+	- `server-config.json`
+2. Set these server environment variables:
+	- `CENTRAL_SERVER_URL=https://your-app.onrender.com`
+	- `WORKER_SHARED_SECRET=<strong-random-token>`
+	- `MAX_ARTIFACT_SIZE_MB=50`
+	- `JOB_MAX_RUNTIME_MS=900000`
+3. Start each remote worker with the same token:
+
+```powershell
+$env:SERVER_URL="https://your-app.onrender.com"
+$env:WORKER_SHARED_SECRET="<strong-random-token>"
+npm run worker
+```
+
+Quick smoke checks:
+
+```powershell
+Invoke-RestMethod https://your-app.onrender.com/api/health
+Invoke-RestMethod https://your-app.onrender.com/api/workers
+Invoke-RestMethod https://your-app.onrender.com/api/jobs
+```
+
+The health payload now includes guardrail settings:
+- `workerAuthEnabled`
+- `maxArtifactSizeMB`
+- `maxJobRuntimeMs`
+
 ## Demo: Training a CNN
 
 1. Launch the app with `npm start`

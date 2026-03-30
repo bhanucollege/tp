@@ -55,6 +55,12 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+const PORT = Number(process.env.PORT) || 3000;
+const JOB_MAX_RUNTIME_MS = Number(process.env.JOB_MAX_RUNTIME_MS || 15 * 60 * 1000);
+const MAX_ARTIFACT_SIZE_MB = Number(process.env.MAX_ARTIFACT_SIZE_MB || 50);
+const WORKER_SHARED_SECRET = process.env.WORKER_SHARED_SECRET || '';
+const DEFAULT_SERVER_URL = process.env.CENTRAL_SERVER_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
 // ==================== CORS & MIDDLEWARE ====================
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
@@ -80,6 +86,90 @@ const workers = new Map();
 const jobs = new Map();
 const jobQueue = [];
 
+const rateWindows = new Map();
+
+function logEvent(event, payload = {}) {
+    const entry = {
+        ts: new Date().toISOString(),
+        event,
+        ...payload
+    };
+    console.log(JSON.stringify(entry));
+}
+
+function getRequestIp(req) {
+    const xf = req.headers['x-forwarded-for'];
+    if (Array.isArray(xf)) return xf[0];
+    if (typeof xf === 'string') return xf.split(',')[0].trim();
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function getRateKey(req, scope = 'ip') {
+    if (scope === 'user') {
+        const userId = req.headers['x-user-id'];
+        return userId ? `user:${String(userId)}` : `ip:${getRequestIp(req)}`;
+    }
+    if (scope === 'worker') {
+        const workerUrl = req.body?.workerUrl;
+        return workerUrl ? `worker:${String(workerUrl)}` : `ip:${getRequestIp(req)}`;
+    }
+    return `ip:${getRequestIp(req)}`;
+}
+
+function createRateLimiter({ bucket, windowMs, max, scope = 'ip' }) {
+    return (req, res, next) => {
+        const now = Date.now();
+        const key = `${bucket}:${getRateKey(req, scope)}`;
+        const state = rateWindows.get(key) || { count: 0, resetAt: now + windowMs };
+
+        if (now > state.resetAt) {
+            state.count = 0;
+            state.resetAt = now + windowMs;
+        }
+
+        state.count += 1;
+        rateWindows.set(key, state);
+
+        if (state.count > max) {
+            const retryAfterSec = Math.max(1, Math.ceil((state.resetAt - now) / 1000));
+            res.set('Retry-After', String(retryAfterSec));
+            logEvent('rate_limited', { bucket, key, path: req.path, method: req.method });
+            return res.status(429).json({ error: 'Rate limit exceeded' });
+        }
+
+        next();
+    };
+}
+
+function requireWorkerAuth(req, res, next) {
+    if (!WORKER_SHARED_SECRET) {
+        return next();
+    }
+    const token = req.headers['x-worker-token'] || req.body?.workerToken;
+    if (!token || token !== WORKER_SHARED_SECRET) {
+        logEvent('worker_auth_failed', { path: req.path, ip: getRequestIp(req) });
+        return res.status(401).json({ error: 'Unauthorized worker' });
+    }
+    next();
+}
+
+function markJobFailed(job, reason) {
+    const worker = workers.get(job.assignedWorker);
+    job.status = 'failed';
+    job.completedAt = Date.now();
+    job.error = reason;
+    if (worker) {
+        worker.jobsFailed++;
+        worker.trustScore = Math.max(0, worker.trustScore - 10);
+        worker.currentJob = null;
+    }
+    logEvent('job_failed', {
+        jobId: job.id,
+        workerUrl: job.assignedWorker,
+        reason
+    });
+}
+
 function isSafeImageRef(value) {
     if (!value || typeof value !== 'string') return false;
     if (/\s/.test(value)) return false;
@@ -104,7 +194,10 @@ const outputStorage = multer.diskStorage({
         cb(null, `${Date.now()}-${safeTaskId}-output.zip`);
     }
 });
-const outputUpload = multer({ storage: outputStorage });
+const outputUpload = multer({
+    storage: outputStorage,
+    limits: { fileSize: MAX_ARTIFACT_SIZE_MB * 1024 * 1024 }
+});
 
 function uploadBufferToCloudinary(file) {
     return new Promise((resolve, reject) => {
@@ -131,7 +224,12 @@ app.post('/upload', upload.array('files'), async (req, res) => {
     });
 });
 
-app.post('/upload-output', outputUpload.single('file'), (req, res) => {
+app.post(
+    '/upload-output',
+    requireWorkerAuth,
+    createRateLimiter({ bucket: 'output-upload', windowMs: 60 * 1000, max: 30, scope: 'worker' }),
+    outputUpload.single('file'),
+    (req, res) => {
     try {
         const taskId = req.body.task_id;
         if (!taskId) {
@@ -153,6 +251,12 @@ app.post('/upload-output', outputUpload.single('file'), (req, res) => {
         job.output_file_url = outputUrl;
 
         broadcastUpdate();
+        logEvent('artifact_uploaded', {
+            jobId: taskId,
+            workerUrl: req.body?.workerUrl || null,
+            bytes: req.file.size,
+            outputUrl
+        });
         return res.json({
             task_id: taskId,
             output_file_url: outputUrl,
@@ -164,9 +268,23 @@ app.post('/upload-output', outputUpload.single('file'), (req, res) => {
     }
 });
 
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: `Artifact too large. Max ${MAX_ARTIFACT_SIZE_MB} MB` });
+    }
+    next(err);
+});
+
 // ==================== WORKER REGISTRATION ====================
-app.post('/register', (req, res) => {
+app.post(
+    '/register',
+    requireWorkerAuth,
+    createRateLimiter({ bucket: 'worker-register', windowMs: 60 * 1000, max: 30, scope: 'worker' }),
+    (req, res) => {
     const { workerUrl, capabilities } = req.body;
+    if (!workerUrl) {
+        return res.status(400).json({ error: 'workerUrl is required' });
+    }
     const existing = workers.get(workerUrl);
 
     workers.set(workerUrl, {
@@ -184,8 +302,11 @@ app.post('/register', (req, res) => {
         jobHistory: existing ? existing.jobHistory : []
     });
 
-    console.log(`✅ Worker registered (${workers.size} total):`, workerUrl);
-    console.log(`   Status: online, currentJob: null, lastAssignedAt: 0`);
+    logEvent('worker_registered', {
+        workerUrl,
+        totalWorkers: workers.size,
+        hostname: capabilities?.hostname || null
+    });
     if (jobQueue.length > 0) {
         console.log(`   🔄 ${jobQueue.length} jobs queued - attempting assignment`);
     }
@@ -200,7 +321,11 @@ app.post('/register', (req, res) => {
 });
 
 // ==================== HEARTBEAT ====================
-app.post('/heartbeat', (req, res) => {
+app.post(
+    '/heartbeat',
+    requireWorkerAuth,
+    createRateLimiter({ bucket: 'worker-heartbeat', windowMs: 60 * 1000, max: 300, scope: 'worker' }),
+    (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
     if (worker) {
@@ -216,7 +341,11 @@ app.post('/heartbeat', (req, res) => {
 });
 
 // ==================== JOB SUBMISSION ====================
-app.post('/submit-job', (req, res) => {
+app.post(
+    '/submit-job',
+    createRateLimiter({ bucket: 'submit-ip', windowMs: 60 * 1000, max: 30, scope: 'ip' }),
+    createRateLimiter({ bucket: 'submit-user', windowMs: 60 * 1000, max: 60, scope: 'user' }),
+    (req, res) => {
     const { description, resources_required, image } = req.body;
 
     if (!isSafeImageRef(image)) {
@@ -243,7 +372,12 @@ app.post('/submit-job', (req, res) => {
 
     jobs.set(jobId, job);
     jobQueue.push(jobId);
-    console.log('📥 Job queued:', jobId);
+    logEvent('job_submitted', {
+        jobId,
+        image: normalizedImage,
+        submitter: req.headers['x-user-id'] || null,
+        ip: getRequestIp(req)
+    });
     broadcastUpdate();
 
     res.json({ jobId, status: 'queued' });
@@ -251,7 +385,11 @@ app.post('/submit-job', (req, res) => {
 
 // ==================== POLL-BASED JOB ASSIGNMENT ====================
 // Workers call this endpoint to pull jobs (works behind NAT/firewalls)
-app.post('/poll-job', (req, res) => {
+app.post(
+    '/poll-job',
+    requireWorkerAuth,
+    createRateLimiter({ bucket: 'poll-job', windowMs: 60 * 1000, max: 180, scope: 'worker' }),
+    (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
     
@@ -307,6 +445,8 @@ app.post('/poll-job', (req, res) => {
         jobQueue.splice(i, 1);
         job.status = 'assigned';
         job.assignedWorker = workerUrl;
+        job.assignedAt = Date.now();
+        job.deadlineAt = Date.now() + JOB_MAX_RUNTIME_MS;
         worker.currentJob = jobId;
         worker.lastAssignedAt = Date.now();
         
@@ -317,8 +457,13 @@ app.post('/poll-job', (req, res) => {
         }
         
         const workerName = worker.capabilities?.hostname || workerUrl;
-        console.log('🚀 Assigning job', jobId.substring(0, 8), 'to', workerName,
-            job.targetWorker ? '(user-selected)' : '(auto via poll)');
+        logEvent('job_assigned', {
+            jobId,
+            workerUrl,
+            workerName,
+            assignmentMode: job.targetWorker ? 'user-selected' : 'auto-poll',
+            deadlineAt: new Date(job.deadlineAt).toISOString()
+        });
         
         broadcastUpdate();
         
@@ -340,7 +485,11 @@ app.post('/poll-job', (req, res) => {
 });
 
 // ==================== JOB STATUS UPDATE (from worker) ====================
-app.post('/job-update', (req, res) => {
+app.post(
+    '/job-update',
+    requireWorkerAuth,
+    createRateLimiter({ bucket: 'job-update', windowMs: 60 * 1000, max: 180, scope: 'worker' }),
+    (req, res) => {
     const { jobId, status, result, error, output_file_url, output_warning, output_files } = req.body;
     const job = jobs.get(jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -349,6 +498,12 @@ app.post('/job-update', (req, res) => {
 
     if (status === 'running') {
         job.startedAt = Date.now();
+        job.deadlineAt = job.startedAt + JOB_MAX_RUNTIME_MS;
+        logEvent('job_running', {
+            jobId,
+            workerUrl: job.assignedWorker,
+            deadlineAt: new Date(job.deadlineAt).toISOString()
+        });
     } else if (status === 'completed') {
         job.completedAt = Date.now();
         job.result = result;
@@ -368,17 +523,13 @@ app.post('/job-update', (req, res) => {
             worker.credits += 10;
             worker.currentJob = null;
         }
-        console.log('✅ Job completed:', jobId);
+        logEvent('job_completed', {
+            jobId,
+            workerUrl: job.assignedWorker,
+            durationMs: job.startedAt ? Date.now() - job.startedAt : null
+        });
     } else if (status === 'failed') {
-        job.completedAt = Date.now();
-        job.error = error;
-        const worker = workers.get(job.assignedWorker);
-        if (worker) {
-            worker.jobsFailed++;
-            worker.trustScore = Math.max(0, worker.trustScore - 10);
-            worker.currentJob = null;
-        }
-        console.log('❌ Job failed:', jobId);
+        markJobFailed(job, error || 'Job failed');
     } else if (status === 'rejected') {
         // Handle worker node dynamically rejecting the 60-second offer
         const worker = workers.get(job.assignedWorker);
@@ -391,7 +542,11 @@ app.post('/job-update', (req, res) => {
         job.assignedWorker = null;
         job.retries++;
         jobQueue.unshift(job.id); // Put back to front of queue
-        console.log('↩️ Job rejected, returned to queue:', jobId);
+        logEvent('job_rejected', {
+            jobId,
+            workerUrl: req.body?.workerUrl || job.assignedWorker,
+            retries: job.retries
+        });
     }
 
     broadcastUpdate();
@@ -426,7 +581,11 @@ setInterval(() => {
                     job.assignedWorker = null;
                     job.retries++;
                     jobQueue.unshift(job.id);
-                    console.log('♻️ Re-queued job:', job.id, '(retry #' + job.retries + ')');
+                    logEvent('job_requeued_worker_timeout', {
+                        jobId: job.id,
+                        workerUrl: url,
+                        retries: job.retries
+                    });
                 }
                 worker.currentJob = null;
             }
@@ -438,6 +597,23 @@ setInterval(() => {
         processQueue();
     }
 }, 10000);
+
+setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+
+    for (const job of jobs.values()) {
+        if ((job.status === 'assigned' || job.status === 'running') && job.deadlineAt && now > job.deadlineAt) {
+            markJobFailed(job, `Job exceeded max runtime (${Math.round(JOB_MAX_RUNTIME_MS / 60000)} min)`);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        broadcastUpdate();
+        processQueue();
+    }
+}, 5000);
 
 // ==================== REST API ====================
 app.get('/api/workers', (req, res) => {
@@ -467,7 +643,12 @@ app.get('/api/health', (req, res) => {
         status: 'ok',
         serverUrl,
         storage,
-        cloudName
+        cloudName,
+        guardrails: {
+            workerAuthEnabled: Boolean(WORKER_SHARED_SECRET),
+            maxArtifactSizeMB: MAX_ARTIFACT_SIZE_MB,
+            maxJobRuntimeMs: JOB_MAX_RUNTIME_MS
+        }
     });
 });
 app.get('/api/jobs', (req, res) => res.json([...jobs.values()].reverse()));
@@ -517,15 +698,9 @@ app.delete('/api/jobs/clear-queue', (req, res) => {
 });
 
 // ==================== UTILITY FUNCTIONS ====================
-const PORT = process.env.PORT || 3000;
 
 function getServerUrl() {
-    // Render provides environment variable for the deployed URL
-    if (process.env.RENDER_EXTERNAL_URL) {
-        return process.env.RENDER_EXTERNAL_URL;
-    }
-    // Fallback to localhost for development
-    return `http://localhost:${PORT}`;
+    return DEFAULT_SERVER_URL;
 }
 
 // ==================== SOCKET.IO REAL-TIME ====================
@@ -567,6 +742,9 @@ io.on('connection', (socket) => {
 
 // ==================== START ====================
 server.listen(PORT, '0.0.0.0', () => {
+    if (!WORKER_SHARED_SECRET) {
+        logEvent('warning', { message: 'WORKER_SHARED_SECRET is not set; worker auth is disabled' });
+    }
     console.log('SERVER_READY');
     console.log(`🚀 Server running on port ${PORT}`);
 });

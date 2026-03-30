@@ -12,11 +12,17 @@ const app = express();
 app.use(express.json());
 
 const PORT = parseInt(process.env.WORKER_PORT) || 4000;
-const SERVER_URL = process.env.SERVER_URL || 'https://shimmerbodylotion-wt.onrender.com';
+const SERVER_URL = process.env.SERVER_URL || 'https://tp-00zg.onrender.com';
 const NGROK_AUTHTOKEN = process.env.NGROK_AUTHTOKEN || null;
+const WORKER_SHARED_SECRET = process.env.WORKER_SHARED_SECRET || '';
 const CONTAINER_OUTPUT_DIR = '/workspace/output';
 
 let workerUrl = process.env.WORKER_URL || null;
+
+function authHeaders() {
+    if (!WORKER_SHARED_SECRET) return {};
+    return { 'x-worker-token': WORKER_SHARED_SECRET };
+}
 
 // ==================== SYSTEM CAPABILITIES ====================
 function getCapabilities() {
@@ -108,7 +114,11 @@ async function registerWorker() {
     }
 
     try {
-        const res = await axios.post(`${SERVER_URL}/register`, { workerUrl, capabilities });
+        const res = await axios.post(
+            `${SERVER_URL}/register`,
+            { workerUrl, capabilities, workerToken: WORKER_SHARED_SECRET || undefined },
+            { headers: authHeaders() }
+        );
         console.log('✅ Registered | Trust:', res.data.trustScore);
 
         registered = true;
@@ -125,7 +135,11 @@ async function registerWorker() {
 
 async function sendHeartbeat() {
     try {
-        await axios.post(`${SERVER_URL}/heartbeat`, { workerUrl });
+        await axios.post(
+            `${SERVER_URL}/heartbeat`,
+            { workerUrl, workerToken: WORKER_SHARED_SECRET || undefined },
+            { headers: authHeaders() }
+        );
     } catch {}
 }
 
@@ -134,7 +148,11 @@ async function pollForJob() {
     if (!registered || isExecuting || activeJobOffer || !workerUrl) return;
 
     try {
-        const res = await axios.post(`${SERVER_URL}/poll-job`, { workerUrl });
+        const res = await axios.post(
+            `${SERVER_URL}/poll-job`,
+            { workerUrl, workerToken: WORKER_SHARED_SECRET || undefined },
+            { headers: authHeaders() }
+        );
         const { job } = res.data;
 
         if (job) {
@@ -144,12 +162,17 @@ async function pollForJob() {
                 const freeMemoryGb = (os.freemem() / (1024 ** 3)).toFixed(2);
                 const reason = `Skipped: low free memory (${freeMemoryGb} GB free, requires >= ${ramLimitGb + 0.75} GB)`;
                 console.warn(`⚠️ ${reason}`);
-                await axios.post(`${targetServer}/job-update`, {
-                    jobId: job.jobId,
-                    status: 'rejected',
-                    error: reason,
-                    workerUrl
-                });
+                await axios.post(
+                    `${targetServer}/job-update`,
+                    {
+                        jobId: job.jobId,
+                        status: 'rejected',
+                        error: reason,
+                        workerUrl,
+                        workerToken: WORKER_SHARED_SECRET || undefined
+                    },
+                    { headers: authHeaders() }
+                );
                 return;
             }
 
@@ -211,10 +234,14 @@ function createZipFromDirectory(sourceDir, zipPath) {
 async function uploadOutputZip(serverUrl, jobId, zipPath) {
     const form = new FormData();
     form.append('task_id', jobId);
+    form.append('workerUrl', workerUrl || '');
+    if (WORKER_SHARED_SECRET) {
+        form.append('workerToken', WORKER_SHARED_SECRET);
+    }
     form.append('file', fs.createReadStream(zipPath), 'output.zip');
 
     const response = await axios.post(`${serverUrl}/upload-output`, form, {
-        headers: form.getHeaders(),
+        headers: { ...form.getHeaders(), ...authHeaders() },
         timeout: 120000
     });
 
@@ -303,7 +330,11 @@ async function handleJob(job) {
     console.log(`🚀 Executing job: ${jobId}`);
 
     try {
-        await axios.post(`${SERVER}/job-update`, { jobId, status: 'running', workerUrl });
+        await axios.post(
+            `${SERVER}/job-update`,
+            { jobId, status: 'running', workerUrl, workerToken: WORKER_SHARED_SECRET || undefined },
+            { headers: authHeaders() }
+        );
 
         const jobsPath = path.join(__dirname, 'jobs');
         if (!fs.existsSync(jobsPath)) fs.mkdirSync(jobsPath);
@@ -367,15 +398,20 @@ async function handleJob(job) {
 
         console.log('✅ Job done');
 
-        await axios.post(`${SERVER}/job-update`, {
-            jobId,
-            status: 'completed',
-            result: stdout,
-            output_file_url: outputFileUrl,
-            output_warning: outputWarning,
-            output_files: outputFiles,
-            workerUrl
-        });
+        await axios.post(
+            `${SERVER}/job-update`,
+            {
+                jobId,
+                status: 'completed',
+                result: stdout,
+                output_file_url: outputFileUrl,
+                output_warning: outputWarning,
+                output_files: outputFiles,
+                workerUrl,
+                workerToken: WORKER_SHARED_SECRET || undefined
+            },
+            { headers: authHeaders() }
+        );
 
         if (fs.existsSync(zipPath)) {
             fs.unlinkSync(zipPath);
@@ -387,12 +423,17 @@ async function handleJob(job) {
     } catch (err) {
         console.error('🔥 Job failed:', err.message);
 
-        await axios.post(`${SERVER}/job-update`, {
-            jobId,
-            status: 'failed',
-            error: err.stderr || err.message,
-            workerUrl
-        });
+        await axios.post(
+            `${SERVER}/job-update`,
+            {
+                jobId,
+                status: 'failed',
+                error: err.stderr || err.message,
+                workerUrl,
+                workerToken: WORKER_SHARED_SECRET || undefined
+            },
+            { headers: authHeaders() }
+        );
 
         isExecuting = false;
     }
@@ -403,16 +444,21 @@ app.listen(PORT, async () => {
     console.log(`🚀 Worker running on port ${PORT}`);
 
     if (NGROK_AUTHTOKEN) {
-        const ngrok = require('@ngrok/ngrok');
-        const listener = await ngrok.forward({
-            addr: PORT,
-            authtoken: NGROK_AUTHTOKEN
-        });
+        try {
+            const ngrok = require('@ngrok/ngrok');
+            const listener = await ngrok.forward({
+                addr: PORT,
+                authtoken: NGROK_AUTHTOKEN
+            });
 
-        workerUrl = listener.url();
-        console.log('🌍 Public URL:', workerUrl);
+            workerUrl = listener.url();
+            console.log('🌍 Public URL:', workerUrl);
+        } catch (err) {
+            workerUrl = process.env.WORKER_URL || `http://${os.hostname()}:${PORT}`;
+            console.warn(`⚠️ ngrok unavailable (${err.message}). Falling back to worker id: ${workerUrl}`);
+        }
     } else {
-        workerUrl = `http://localhost:${PORT}`;
+        workerUrl = process.env.WORKER_URL || `http://${os.hostname()}:${PORT}`;
     }
 
     registerWorker();
