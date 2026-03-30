@@ -1,0 +1,9 @@
+{
+  "serverUrl": "http://localhost:3001",
+  "workerUrl": "https://tugless-hypersystolic-caroll.ngrok-free.dev",
+  "description": "Server configuration for SharingIsCaring",
+  "instructions": {
+    "serverUrl": "For local dev: http://localhost:3001 | For production: https://your-app.onrender.com",
+    "workerUrl": "Optional: explicit worker IP (e.g., http://172.29.224.1:4000). Leave null for auto-detection"
+  }
+}
