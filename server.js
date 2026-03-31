@@ -347,7 +347,7 @@ app.use((err, req, res, next) => {
 app.post(
     '/register',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'worker-register', windowMs: 60 * 1000, max: 30, scope: 'worker' }),
+    createRateLimiter({ bucket: 'worker-register', windowMs: 60 * 1000, max: 100, scope: 'worker' }),
     (req, res) => {
     const { workerUrl, capabilities } = req.body;
     if (!workerUrl) {
@@ -392,7 +392,7 @@ app.post(
 app.post(
     '/heartbeat',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'worker-heartbeat', windowMs: 60 * 1000, max: 300, scope: 'worker' }),
+    createRateLimiter({ bucket: 'worker-heartbeat', windowMs: 60 * 1000, max: 600, scope: 'worker' }),
     (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
@@ -484,7 +484,7 @@ app.post(
 app.post(
     '/poll-job',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'poll-job', windowMs: 60 * 1000, max: 180, scope: 'worker' }),
+    createRateLimiter({ bucket: 'poll-job', windowMs: 60 * 1000, max: 300, scope: 'worker' }),
     (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
