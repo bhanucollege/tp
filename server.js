@@ -142,6 +142,12 @@ function createRateLimiter({ bucket, windowMs, max, scope = 'ip' }) {
     };
 }
 
+function isAuthenticatedWorker(req) {
+    if (!WORKER_SHARED_SECRET) return false;
+    const token = req.headers['x-worker-token'] || req.body?.workerToken;
+    return token && token === WORKER_SHARED_SECRET;
+}
+
 function requireWorkerAuth(req, res, next) {
     if (!WORKER_SHARED_SECRET) {
         return next();
@@ -151,6 +157,15 @@ function requireWorkerAuth(req, res, next) {
         logEvent('worker_auth_failed', { path: req.path, ip: getRequestIp(req) });
         return res.status(401).json({ error: 'Unauthorized worker' });
     }
+    next();
+}
+
+function skipRateLimitForAuthWorkers(req, res, next) {
+    // Skip rate limiting entirely for authenticated workers
+    if (isAuthenticatedWorker(req)) {
+        return next();
+    }
+    // For unauthenticated requests, rate limiting will be applied
     next();
 }
 
@@ -295,7 +310,8 @@ app.post(
 app.post(
     '/upload-output',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'output-upload', windowMs: 60 * 1000, max: 30, scope: 'worker' }),
+    skipRateLimitForAuthWorkers,
+    createRateLimiter({ bucket: 'output-upload', windowMs: 60 * 1000, max: 100, scope: 'worker' }),
     outputUpload.single('file'),
     (req, res) => {
     try {
@@ -347,7 +363,8 @@ app.use((err, req, res, next) => {
 app.post(
     '/register',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'worker-register', windowMs: 60 * 1000, max: 100, scope: 'worker' }),
+    skipRateLimitForAuthWorkers,
+    createRateLimiter({ bucket: 'worker-register', windowMs: 60 * 1000, max: 200, scope: 'worker' }),
     (req, res) => {
     const { workerUrl, capabilities } = req.body;
     if (!workerUrl) {
@@ -392,7 +409,8 @@ app.post(
 app.post(
     '/heartbeat',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'worker-heartbeat', windowMs: 60 * 1000, max: 600, scope: 'worker' }),
+    skipRateLimitForAuthWorkers,
+    createRateLimiter({ bucket: 'worker-heartbeat', windowMs: 60 * 1000, max: 1200, scope: 'worker' }),
     (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
@@ -484,7 +502,8 @@ app.post(
 app.post(
     '/poll-job',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'poll-job', windowMs: 60 * 1000, max: 300, scope: 'worker' }),
+    skipRateLimitForAuthWorkers,
+    createRateLimiter({ bucket: 'poll-job', windowMs: 60 * 1000, max: 600, scope: 'worker' }),
     (req, res) => {
     const { workerUrl } = req.body;
     const worker = workers.get(workerUrl);
@@ -590,7 +609,8 @@ app.post(
 app.post(
     '/job-update',
     requireWorkerAuth,
-    createRateLimiter({ bucket: 'job-update', windowMs: 60 * 1000, max: 180, scope: 'worker' }),
+    skipRateLimitForAuthWorkers,
+    createRateLimiter({ bucket: 'job-update', windowMs: 60 * 1000, max: 360, scope: 'worker' }),
     (req, res) => {
     const { jobId, status, result, error, errorCategory, output_file_url, output_warning, output_files } = req.body;
     const job = jobs.get(jobId);
