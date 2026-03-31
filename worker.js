@@ -109,23 +109,38 @@ function fixCsvPathsInPython(jobsPath, csvFiles) {
             // Simple string replacements for common CSV patterns
             for (const csvFileName of csvFiles) {
                 const baseName = path.basename(csvFileName);
-                // Escape special regex characters in the filename to avoid regex errors
-                const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 
-                // Replace various CSV path patterns
-                // Single quotes: 'data.csv' -> '/app/data.csv'
-                content = content.replace(new RegExp(`'${escaped}'`, 'g'), `'/app/${baseName}'`);
-                // Double quotes: "data.csv" -> "/app/data.csv"
-                content = content.replace(new RegExp(`"${escaped}"`, 'g'), `"/app/${baseName}"`);
-                // Relative path forms: './data.csv' -> '/app/data.csv'
-                content = content.replace(new RegExp(`'\\.\/${escaped}'`, 'g'), `'/app/${baseName}'`);
-                content = content.replace(new RegExp(`"\\.\\/${escaped}"`, 'g'), `"/app/${baseName}"`);
+                // Extract the original filename (remove timestamp prefix if present)
+                // Server uploads files with timestamp: 1774930392589-data.csv
+                // But Python code refers to original: 'data.csv'
+                // So we need to replace both the timestamped and original filenames
+                const timestampMatch = baseName.match(/^\d+-(.+)$/);
+                const originalName = timestampMatch ? timestampMatch[1] : baseName;
+                
+                // Escape special regex characters in filenames
+                const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const escapedOrig = originalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                
+                // Replace timestamps filename versions: '1774930392589-data.csv' -> '/app/1774930392589-data.csv'
+                content = content.replace(new RegExp(`'${escapedBase}'`, 'g'), `'/app/${baseName}'`);
+                content = content.replace(new RegExp(`"${escapedBase}"`, 'g'), `"/app/${baseName}"`);
+                content = content.replace(new RegExp(`'\\.\/${escapedBase}'`, 'g'), `'/app/${baseName}'`);
+                content = content.replace(new RegExp(`"\\.\\/${escapedBase}"`, 'g'), `"/app/${baseName}"`);
+                
+                // Replace original filename versions: 'data.csv' -> '/app/1774930392589-data.csv'
+                // (map original names to timestamped names so Python can find them)
+                if (originalName !== baseName) {
+                    content = content.replace(new RegExp(`'${escapedOrig}'`, 'g'), `'/app/${baseName}'`);
+                    content = content.replace(new RegExp(`"${escapedOrig}"`, 'g'), `"/app/${baseName}"`);
+                    content = content.replace(new RegExp(`'\\.\/${escapedOrig}'`, 'g'), `'/app/${baseName}'`);
+                    content = content.replace(new RegExp(`"\\.\\/${escapedOrig}"`, 'g'), `"/app/${baseName}"`);
+                }
             }
             
             // Only write if changed
             if (content !== originalContent) {
                 fs.writeFileSync(filePath, content, 'utf8');
-                console.log(`📝 Fixed CSV paths in ${pyFile}`);
+                console.log(`📝 Fixed CSV paths in ${pyFile} (mapped original filenames to timestamped versions)`);
                 totalFixed++;
             }
         }
