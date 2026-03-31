@@ -96,6 +96,41 @@ function normalizeLineEndings(filePath) {
     }
 }
 
+function fixCsvPathsInPython(jobsPath, csvFiles) {
+    try {
+        const pyFiles = fs.readdirSync(jobsPath).filter(f => f.endsWith('.py'));
+        for (const pyFile of pyFiles) {
+            let content = fs.readFileSync(path.join(jobsPath, pyFile), 'utf8');
+            let modified = false;
+            
+            // Replace relative CSV paths with absolute /app paths
+            for (const csvFile of csvFiles) {
+                const csvFileName = path.basename(csvFile);
+                // Replace 'data.csv', './data.csv', './data.csv', etc. with /app/data.csv
+                content = content.replace(
+                    new RegExp(`['\"]\\.*\\/)?${csvFileName}['\"]`, 'g'),
+                    `'/app/${csvFileName}'`
+                );
+                // Also replace just the filename if it's passed as a variable
+                content = content.replace(
+                    new RegExp(`['\"](\\w*${csvFileName})['\"]`, 'g'),
+                    `'/app/${csvFileName}'`
+                );
+                if (content !== fs.readFileSync(path.join(jobsPath, pyFile), 'utf8')) {
+                    modified = true;
+                }
+            }
+            
+            if (modified) {
+                fs.writeFileSync(path.join(jobsPath, pyFile), content, 'utf8');
+                console.log('📝 Fixed CSV paths in:', pyFile);
+            }
+        }
+    } catch (err) {
+        console.log('⚠️ Could not fix CSV paths:', err.message);
+    }
+}
+
 function createZipFromDirectory(sourceDir, zipPath) {
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(zipPath);
@@ -132,7 +167,8 @@ async function registerWorker() {
         // Start heartbeat loop (every 5 seconds)
         setInterval(sendHeartbeat, 5000);
     } catch (err) {
-        console.log('❌ Register failed, retrying...');
+        console.log('❌ Register failed:', err.response?.status, err.response?.data?.error || err.message);
+        console.log('   Retrying in 3 seconds...');
         setTimeout(registerWorker, 3000);
     }
 }
@@ -168,7 +204,14 @@ async function pollForJob() {
             handleJob(job);
         }
     } catch (err) {
-        console.log('⚠️ Poll failed:', err.message);
+        const status = err.response?.status || 'unknown';
+        const errorMsg = err.response?.data?.error || err.message;
+        console.log(`⚠️ Poll failed (${status}):`, errorMsg);
+        if (status === 404) {
+            console.log('   Worker not registered - attempting to re-register...');
+            registered = false;
+            registerWorker();
+        }
     }
 }
 
@@ -271,6 +314,7 @@ CMD ["python", "${entryFile}"]
 
             let entryFile = 'main.py';
             const downloadedFiles = [];
+            const csvFiles = [];
 
             // Download all provided files
             for (const file of files) {
@@ -281,6 +325,7 @@ CMD ["python", "${entryFile}"]
                     : path.basename(cleanPath);
 
                 if (fileName.endsWith('.py')) entryFile = fileName;
+                if (fileName.endsWith('.csv')) csvFiles.push(fileName);
 
                 const localPath = path.join(jobsPath, fileName);
                 downloadedFiles.push(fileName);
@@ -297,6 +342,11 @@ CMD ["python", "${entryFile}"]
                     normalizeLineEndings(localPath);
                     console.log('📝 Normalized line endings:', fileName);
                 }
+            }
+            
+            // Fix CSV paths in Python files to use /app/filename.csv
+            if (csvFiles.length > 0) {
+                fixCsvPathsInPython(jobsPath, csvFiles);
             }
 
             // Create Dockerfile for Python environment with explicit platform
