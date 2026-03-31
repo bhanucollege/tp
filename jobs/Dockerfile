@@ -1,6 +1,6 @@
 
-FROM --platform=linux/amd64 python:3.10
+FROM python:3.10
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir pandas numpy scikit-learn matplotlib tensorflow
-CMD ["python", "1774935416932-main%20(1).py"]
+RUN pip install pandas numpy
+CMD ["python", "1774936187426-main%20(1).py"]

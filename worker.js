@@ -187,12 +187,14 @@ let heartbeatInterval = null;
 // ==================== REGISTER ====================
 async function registerWorker() {
     try {
+        console.log(`📤 Registering with server: ${SERVER_URL}/register`);
         const payload = { workerUrl, capabilities };
         if (WORKER_SHARED_SECRET) {
             payload.workerToken = WORKER_SHARED_SECRET;
         }
-        await axios.post(`${SERVER_URL}/register`, payload, { headers: authHeaders() });
+        const response = await axios.post(`${SERVER_URL}/register`, payload, { headers: authHeaders() });
         console.log('✅ Registered:', workerUrl);
+        console.log('   Response:', response.status, response.data);
 
         registered = true;
 
@@ -206,7 +208,13 @@ async function registerWorker() {
             heartbeatInterval = setInterval(sendHeartbeat, 5000);
         }
     } catch (err) {
-        console.log('❌ Register failed:', err.response?.status, err.response?.data?.error || err.message);
+        console.error('❌ Register failed:');
+        if (err.response) {
+            console.error('   Status:', err.response.status);
+            console.error('   Data:', err.response.data);
+        } else {
+            console.error('   Error:', err.message);
+        }
         console.log('   Retrying in 3 seconds...');
         setTimeout(registerWorker, 3000);
     }
@@ -335,7 +343,9 @@ CMD ["python", "${entryFile}"]
 
             const imageName = `job-${jobId}`;
 
-            await runCommand(`docker build -t ${imageName} ${jobsPath}`);
+            await runCommand(
+                `docker run --platform linux/amd64 --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${imageName}`
+            );
 
             const result = await runCommand(
                 `docker run --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${imageName}`
@@ -537,8 +547,11 @@ CMD ["python", "${entryFile}"]
 app.listen(PORT, () => {
     console.log(`🚀 Worker running at ${workerUrl}`);
     console.log(`   Capabilities: ${JSON.stringify(capabilities)}`);
+    console.log(`   Server URL: ${SERVER_URL}`);
     if (WORKER_SHARED_SECRET) {
         console.log('🔐 Worker auth enabled');
+    } else {
+        console.log('⚠️ Worker auth DISABLED (no WORKER_SHARED_SECRET)');
     }
     registerWorker();
 });
