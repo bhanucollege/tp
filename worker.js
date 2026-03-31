@@ -88,11 +88,20 @@ function runCommand(command) {
 function normalizeLineEndings(filePath) {
     try {
         let content = fs.readFileSync(filePath, 'utf8');
+        const originalLength = content.length;
+        
         // Convert CRLF (Windows) to LF (Unix)
         content = content.replace(/\r\n/g, '\n');
-        fs.writeFileSync(filePath, content, 'utf8');
+        
+        // Write as Buffer to ensure no OS-level line ending conversion on Windows
+        fs.writeFileSync(filePath, Buffer.from(content, 'utf8'));
+        
+        const newLength = content.length;
+        if (newLength !== originalLength) {
+            console.log(`   📝 Line endings fixed for ${path.basename(filePath)} (${originalLength} → ${newLength} bytes)`);
+        }
     } catch (err) {
-        console.log('⚠️ Could not normalize line endings for', path.basename(filePath));
+        console.log('⚠️ Could not normalize line endings for', path.basename(filePath), err.message);
     }
 }
 
@@ -384,9 +393,18 @@ CMD ["python", "${entryFile}"]
             console.log('🔧 Ensuring all Python files have Unix line endings...');
             const allPyFiles = fs.readdirSync(jobsPath).filter(f => f.endsWith('.py'));
             for (const pyFile of allPyFiles) {
-                normalizeLineEndings(path.join(jobsPath, pyFile));
-                console.log('✅ Normalized: ' + pyFile);
+                const pyPath = path.join(jobsPath, pyFile);
+                normalizeLineEndings(pyPath);
+                
+                // Debug: check the first few bytes to verify line endings
+                try {
+                    const content = fs.readFileSync(pyPath, 'utf8');
+                    const hasCRLF = content.includes('\r\n');
+                    const hasLF = content.includes('\n');
+                    console.log(`   ${pyFile}: LF=${hasLF}, CRLF=${hasCRLF}, size=${content.length} bytes`);
+                } catch (e) {}
             }
+            console.log('✅ Line ending normalization complete');
 
             // Check if requirements.txt exists
             const requirementsPath = path.join(jobsPath, 'requirements.txt');
@@ -404,16 +422,15 @@ CMD ["python", "${entryFile}"]
 
             // Ensure entryFile is just a filename, no path separators
             const cleanEntryFile = path.basename(entryFile).replace(/\\/g, '/');
+            console.log(`📄 Entry file: ${cleanEntryFile}`);
 
-            const dockerfile = `
-FROM --platform=linux/amd64 python:3.10
-WORKDIR /app
-COPY . .
-${pipInstallCmd}
-CMD ["python", "${cleanEntryFile}"]
-`;
-
-            fs.writeFileSync(path.join(jobsPath, 'Dockerfile'), dockerfile);
+            let dockerfile = `FROM --platform=linux/amd64 python:3.10\nWORKDIR /app\nCOPY . .\n${pipInstallCmd}\nCMD ["python", "${cleanEntryFile}"]\n`;
+            
+            const dockerfilePath = path.join(jobsPath, 'Dockerfile');
+            fs.writeFileSync(dockerfilePath, dockerfile, 'utf8');
+            
+            // Normalize the Dockerfile itself to ensure LF
+            normalizeLineEndings(dockerfilePath);
 
             const imageName = `python-job-${jobId}`;
 
