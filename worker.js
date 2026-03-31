@@ -345,30 +345,35 @@ async function handleJob(job) {
 
         let stdout = '';
         let stderr = '';
-        if (mode !== 'docker-image') {
-            throw new Error('Unsupported job mode: this worker only executes docker-image jobs');
-        }
+        if (mode === 'docker-image') {
+            if (!isSafeImageRef(image)) {
+                throw new Error('Docker image reference is required for docker-image mode');
+            }
+            if (!capabilities.dockerAvailable) {
+                throw new Error('Worker cannot run docker-image job because Docker is unavailable');
+            }
 
-        if (!isSafeImageRef(image)) {
-            throw new Error('Docker image reference is required for docker-image mode');
-        }
-        if (!capabilities.dockerAvailable) {
-            throw new Error('Worker cannot run docker-image job because Docker is unavailable');
-        }
+            try {
+                console.log(`🐳 Pulling image: ${image}`);
+                await runCommand(`docker pull ${image}`, { timeout: 300000 });
 
-        try {
-            console.log(`🐳 Pulling image: ${image}`);
-            await runCommand(`docker pull ${image}`, { timeout: 300000 });
-
-            console.log('🐳 Running container job with resource limits...');
-            const dockerRun = await runJobInDocker(image, outputDir, resources_required);
-            stdout = dockerRun.stdout || '';
-            stderr = dockerRun.stderr || '';
-        } catch (dockerErr) {
-            console.warn(`⚠️ Docker execution failed, attempting local fallback: ${dockerErr.message}`);
+                console.log('🐳 Running container job with resource limits...');
+                const dockerRun = await runJobInDocker(image, outputDir, resources_required);
+                stdout = dockerRun.stdout || '';
+                stderr = dockerRun.stderr || '';
+            } catch (dockerErr) {
+                console.warn(`⚠️ Docker execution failed, attempting local fallback: ${dockerErr.message}`);
+                const localRun = await runLocalFallback(job, jobsPath, outputDir);
+                stdout = localRun.stdout || '';
+                stderr = [dockerErr.stderr || dockerErr.message || '', localRun.stderr || ''].filter(Boolean).join('\n');
+            }
+        } else if (mode === 'python-files') {
+            console.log('📦 Running uploaded file job (python-files mode)...');
             const localRun = await runLocalFallback(job, jobsPath, outputDir);
             stdout = localRun.stdout || '';
-            stderr = [dockerErr.stderr || dockerErr.message || '', localRun.stderr || ''].filter(Boolean).join('\n');
+            stderr = localRun.stderr || '';
+        } else {
+            throw new Error(`Unsupported job mode: ${mode}`);
         }
 
         const logsPath = path.join(outputDir, 'logs.txt');

@@ -79,6 +79,7 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const outputsDir = path.join(__dirname, 'outputs');
 if (!fs.existsSync(outputsDir)) fs.mkdirSync(outputsDir);
+app.use('/uploads', express.static(uploadsDir));
 app.use('/outputs', express.static(outputsDir));
 
 // ==================== DATA STORES ====================
@@ -218,11 +219,78 @@ function uploadBufferToCloudinary(file) {
     });
 }
 
-app.post('/upload', upload.array('files'), async (req, res) => {
-    return res.status(410).json({
-        error: 'File uploads are disabled. Submit docker-image jobs using POST /submit-job with an image reference.'
-    });
-});
+app.post(
+    '/upload',
+    createRateLimiter({ bucket: 'upload-ip', windowMs: 60 * 1000, max: 20, scope: 'ip' }),
+    createRateLimiter({ bucket: 'upload-user', windowMs: 60 * 1000, max: 40, scope: 'user' }),
+    upload.array('files'),
+    async (req, res) => {
+        try {
+            const files = Array.isArray(req.files) ? req.files : [];
+            if (files.length === 0) {
+                return res.status(400).json({ error: 'At least one file is required' });
+            }
+
+            const description = (req.body?.description || '').trim();
+            const resources_required = req.body?.resources_required
+                ? JSON.parse(req.body.resources_required)
+                : { cpu: 1, ram: 1, gpu: false };
+
+            const fileUrls = [];
+            if (cloudinary && cloudinaryConfigured) {
+                for (const file of files) {
+                    const result = await uploadBufferToCloudinary(file);
+                    fileUrls.push(result.secure_url);
+                }
+            } else {
+                for (const file of files) {
+                    fileUrls.push(`${getServerUrl()}/uploads/${encodeURIComponent(path.basename(file.filename))}`);
+                }
+            }
+
+            const jobId = crypto.randomUUID();
+            const fileSignature = fileUrls
+                .map((f) => decodeURIComponent(path.basename(new URL(f).pathname)))
+                .sort()
+                .join('|');
+
+            const job = {
+                id: jobId,
+                files: fileUrls,
+                mode: 'python-files',
+                image: null,
+                status: 'queued',
+                description: description || 'Uploaded script job',
+                resources_required,
+                submittedAt: Date.now(), assignedWorker: null,
+                startedAt: null, completedAt: null,
+                result: null, error: null, retries: 0,
+                fileSignature,
+                targetWorker: null
+            };
+
+            jobs.set(jobId, job);
+            jobQueue.push(jobId);
+            logEvent('job_submitted_upload', {
+                jobId,
+                files: fileUrls.length,
+                submitter: req.headers['x-user-id'] || null,
+                ip: getRequestIp(req)
+            });
+            broadcastUpdate();
+
+            return res.json({
+                jobId,
+                status: 'queued',
+                mode: 'python-files',
+                files: fileUrls
+            });
+        } catch (err) {
+            console.error('❌ Upload submission error:', err.message);
+            return res.status(500).json({ error: `Upload failed: ${err.message}` });
+        }
+    }
+);
 
 app.post(
     '/upload-output',
@@ -470,8 +538,8 @@ app.post(
         return res.json({
             job: {
                 jobId: job.id,
-                files: [],
-                mode: 'docker-image',
+                files: Array.isArray(job.files) ? job.files : [],
+                mode: job.mode || 'docker-image',
                 image: job.image || null,
                 description: job.description,
                 resources_required: job.resources_required,

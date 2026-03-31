@@ -14,7 +14,9 @@ const cuteNotes = [
 const SubmitJob = () => {
     const { currentUrl } = useSocket();
     const theme = useTheme();
+    const [submitMode, setSubmitMode] = useState('docker-image');
     const [dockerImage, setDockerImage] = useState('');
+    const [selectedFiles, setSelectedFiles] = useState([]);
     const [description, setDescription] = useState('');
     const [submitting, setSubmitting] = useState(false);
     const navigate = useNavigate();
@@ -24,7 +26,11 @@ const SubmitJob = () => {
             return;
         }
 
-        if (!dockerImage.trim()) {
+        if (submitMode === 'docker-image' && !dockerImage.trim()) {
+            return;
+        }
+
+        if (submitMode === 'python-files' && selectedFiles.length === 0) {
             return;
         }
 
@@ -42,16 +48,29 @@ const SubmitJob = () => {
                 console.warn('[SubmitJob] Health check warning:', healthError.message);
             }
 
-            let payload = {
-                description: description.trim(),
-                resources_required: { cpu: 2, ram: 2, gpu: false },
-                mode: 'docker-image',
-                image: dockerImage.trim()
-            };
-
-            await axios.post(`${currentUrl}/submit-job`, payload, { timeout: 10000 });
+            if (submitMode === 'docker-image') {
+                const payload = {
+                    description: description.trim(),
+                    resources_required: { cpu: 2, ram: 2, gpu: false },
+                    mode: 'docker-image',
+                    image: dockerImage.trim()
+                };
+                await axios.post(`${currentUrl}/submit-job`, payload, { timeout: 10000 });
+            } else {
+                const formData = new FormData();
+                formData.append('description', description.trim());
+                formData.append('resources_required', JSON.stringify({ cpu: 2, ram: 2, gpu: false }));
+                for (const file of selectedFiles) {
+                    formData.append('files', file);
+                }
+                await axios.post(`${currentUrl}/upload`, formData, {
+                    timeout: 30000,
+                    headers: { 'Content-Type': 'multipart/form-data' }
+                });
+            }
 
             setDockerImage('');
+            setSelectedFiles([]);
             setDescription('');
             navigate('/');
         } catch (error) {
@@ -93,6 +112,23 @@ const SubmitJob = () => {
                 <article className="card chat-window mail-window">
                     <div className="chat-window-grid">
                         <div className="chat-stage">
+                            <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                                <button
+                                    className={`btn ${submitMode === 'docker-image' ? 'btn-p' : 'btn-g'}`}
+                                    type="button"
+                                    onClick={() => setSubmitMode('docker-image')}
+                                >
+                                    Docker image
+                                </button>
+                                <button
+                                    className={`btn ${submitMode === 'python-files' ? 'btn-p' : 'btn-g'}`}
+                                    type="button"
+                                    onClick={() => setSubmitMode('python-files')}
+                                >
+                                    Upload files
+                                </button>
+                            </div>
+
                             <div className="compose-window-bar">
                                 <div className="compose-window-dots" aria-hidden="true">
                                     <span></span>
@@ -113,20 +149,36 @@ const SubmitJob = () => {
                                 <span className="sl2">{theme === 'coquette' ? 'Add image reference first' : 'Provide image reference first'}</span>
                             </div>
 
-                            <div style={{ marginBottom: '16px' }}>
-                                <label className="composer-label" htmlFor="docker-image">docker image reference</label>
-                                <input
-                                    id="docker-image"
-                                    type="text"
-                                    value={dockerImage}
-                                    onChange={(event) => setDockerImage(event.target.value)}
-                                    placeholder="username/ml-job:latest"
-                                    style={{ width: '100%', marginTop: '8px', padding: '12px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--bg-0)', color: 'var(--text)' }}
-                                />
-                                <p className="sl2" style={{ marginTop: '8px' }}>
-                                    Worker will run: docker pull {dockerImage || '<image>'} && docker run --rm {dockerImage || '<image>'}
-                                </p>
-                            </div>
+                            {submitMode === 'docker-image' ? (
+                                <div style={{ marginBottom: '16px' }}>
+                                    <label className="composer-label" htmlFor="docker-image">docker image reference</label>
+                                    <input
+                                        id="docker-image"
+                                        type="text"
+                                        value={dockerImage}
+                                        onChange={(event) => setDockerImage(event.target.value)}
+                                        placeholder="username/ml-job:latest"
+                                        style={{ width: '100%', marginTop: '8px', padding: '12px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--bg-0)', color: 'var(--text)' }}
+                                    />
+                                    <p className="sl2" style={{ marginTop: '8px' }}>
+                                        Worker will run: docker pull {dockerImage || '<image>'} && docker run --rm {dockerImage || '<image>'}
+                                    </p>
+                                </div>
+                            ) : (
+                                <div style={{ marginBottom: '16px' }}>
+                                    <label className="composer-label" htmlFor="job-files">upload python/csv files</label>
+                                    <input
+                                        id="job-files"
+                                        type="file"
+                                        multiple
+                                        onChange={(event) => setSelectedFiles(Array.from(event.target.files || []))}
+                                        style={{ width: '100%', marginTop: '8px' }}
+                                    />
+                                    <p className="sl2" style={{ marginTop: '8px' }}>
+                                        Select your script and dataset files. Worker executes in python-files mode.
+                                    </p>
+                                </div>
+                            )}
 
                             <div className="composer-shell message-shell">
                                 <div className="compose-section-head">
@@ -146,7 +198,12 @@ const SubmitJob = () => {
                                     <button
                                         className={`btn btn-p ${submitting ? 'is-loading' : ''}`}
                                         onClick={submitJob}
-                                        disabled={!dockerImage.trim() || submitting || !description.trim()}
+                                        disabled={
+                                            submitting ||
+                                            !description.trim() ||
+                                            (submitMode === 'docker-image' && !dockerImage.trim()) ||
+                                            (submitMode === 'python-files' && selectedFiles.length === 0)
+                                        }
                                     >
                                         {submitting && (
                                             <span className="spark-loader" aria-hidden="true">
