@@ -379,6 +379,15 @@ CMD ["python", "${entryFile}"]
                 fixCsvPathsInPython(jobsPath, csvFiles);
             }
 
+            // CRITICAL: Re-normalize ALL Python files after modifications to ensure LF line endings
+            // (fixCsvPathsInPython may have reintroduced CRLF on Windows)
+            console.log('🔧 Ensuring all Python files have Unix line endings...');
+            const allPyFiles = fs.readdirSync(jobsPath).filter(f => f.endsWith('.py'));
+            for (const pyFile of allPyFiles) {
+                normalizeLineEndings(path.join(jobsPath, pyFile));
+                console.log('✅ Normalized: ' + pyFile);
+            }
+
             // Check if requirements.txt exists
             const requirementsPath = path.join(jobsPath, 'requirements.txt');
             const hasRequirements = fs.existsSync(requirementsPath);
@@ -393,12 +402,15 @@ CMD ["python", "${entryFile}"]
                 pipInstallCmd = 'RUN pip install --no-cache-dir pandas numpy scikit-learn matplotlib tensorflow';
             }
 
+            // Ensure entryFile is just a filename, no path separators
+            const cleanEntryFile = path.basename(entryFile).replace(/\\/g, '/');
+
             const dockerfile = `
 FROM --platform=linux/amd64 python:3.10
 WORKDIR /app
 COPY . .
 ${pipInstallCmd}
-CMD ["python", "${entryFile}"]
+CMD ["python", "${cleanEntryFile}"]
 `;
 
             fs.writeFileSync(path.join(jobsPath, 'Dockerfile'), dockerfile);
