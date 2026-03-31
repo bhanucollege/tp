@@ -414,41 +414,69 @@ app.post(
     createRateLimiter({ bucket: 'submit-ip', windowMs: 60 * 1000, max: 30, scope: 'ip' }),
     createRateLimiter({ bucket: 'submit-user', windowMs: 60 * 1000, max: 60, scope: 'user' }),
     (req, res) => {
-    const { description, resources_required, image } = req.body;
 
-    if (!isSafeImageRef(image)) {
-        return res.status(400).json({ error: 'Valid Docker image is required' });
+    const { description, resources_required, image, files } = req.body;
+
+    let mode;
+    let jobFiles = [];
+    let normalizedImage = null;
+
+    // ==================== MODE DETECTION ====================
+    if (image && isSafeImageRef(image)) {
+        mode = "docker-image";
+        normalizedImage = image.trim();
+    } 
+    else if (files && files.length > 0) {
+        mode = "build-and-run";
+        jobFiles = files;
+    } 
+    else {
+        return res.status(400).json({
+            error: "Provide a valid Docker image OR files"
+        });
     }
 
     const jobId = crypto.randomUUID();
-    const normalizedImage = image.trim();
-    const fileSignature = `image:${normalizedImage}`;
+
     const job = {
         id: jobId,
-        files: [],
-        mode: 'docker-image',
+        files: jobFiles,
+        mode,
         image: normalizedImage,
         status: 'queued',
         description: description || 'No description provided',
         resources_required: resources_required || { cpu: 1, ram: 0.5, gpu: false },
-        submittedAt: Date.now(), assignedWorker: null,
-        startedAt: null, completedAt: null,
-        result: null, error: null, retries: 0,
-        fileSignature,
+        submittedAt: Date.now(),
+        assignedWorker: null,
+        startedAt: null,
+        completedAt: null,
+        result: null,
+        error: null,
+        retries: 0,
+        fileSignature: mode === "docker-image"
+            ? `image:${normalizedImage}`
+            : jobFiles.join('|'),
         targetWorker: null
     };
 
     jobs.set(jobId, job);
     jobQueue.push(jobId);
+
     logEvent('job_submitted', {
         jobId,
+        mode,
         image: normalizedImage,
-        submitter: req.headers['x-user-id'] || null,
+        files: jobFiles.length,
         ip: getRequestIp(req)
     });
+
     broadcastUpdate();
 
-    res.json({ jobId, status: 'queued' });
+    res.json({
+        jobId,
+        status: 'queued',
+        mode
+    });
 });
 
 // ==================== POLL-BASED JOB ASSIGNMENT ====================
