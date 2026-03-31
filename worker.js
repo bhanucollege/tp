@@ -172,6 +172,8 @@ function createZipFromDirectory(sourceDir, zipPath) {
 // ==================== STATE ====================
 let isExecuting = false;
 let registered = false;
+let pollInterval = null;
+let heartbeatInterval = null;
 
 // ==================== REGISTER ====================
 async function registerWorker() {
@@ -185,11 +187,15 @@ async function registerWorker() {
 
         registered = true;
 
-        // Start polling for jobs
-        setInterval(pollForJob, 3000);
+        // Start polling for jobs (only once)
+        if (!pollInterval) {
+            pollInterval = setInterval(pollForJob, 3000);
+        }
         
-        // Start heartbeat loop (every 5 seconds)
-        setInterval(sendHeartbeat, 5000);
+        // Start heartbeat loop (only once, every 5 seconds)
+        if (!heartbeatInterval) {
+            heartbeatInterval = setInterval(sendHeartbeat, 5000);
+        }
     } catch (err) {
         console.log('❌ Register failed:', err.response?.status, err.response?.data?.error || err.message);
         console.log('   Retrying in 3 seconds...');
@@ -232,7 +238,7 @@ async function pollForJob() {
         const errorMsg = err.response?.data?.error || err.message;
         console.log(`⚠️ Poll failed (${status}):`, errorMsg);
         if (status === 404) {
-            console.log('   Worker not registered - attempting to re-register...');
+            console.log(`   Worker URL: ${workerUrl} not registered - attempting to re-register...`);
             registered = false;
             registerWorker();
         }
@@ -333,7 +339,7 @@ CMD ["python", "${entryFile}"]
         }
 
         // ================= PYTHON FILES =================
-        else if (mode === 'python-files') {
+        else if (mode === 'python-files' || mode === 'build-and-run') {
             if (!files || files.length === 0) throw new Error('No files provided');
 
             let entryFile = 'main.py';
@@ -402,7 +408,8 @@ CMD ["python", "${entryFile}"]
         }
 
         else {
-            throw new Error('Unsupported mode');
+            const supportedModes = ['docker-image', 'python-files', 'build-and-run'];
+            throw new Error(`❌ Unsupported job mode: '${mode}'. This worker supports: ${supportedModes.join(', ')}`);
         }
 
         // ================= SAVE OUTPUT =================
