@@ -519,6 +519,12 @@ app.post(
         const job = jobs.get(jobId);
         if (!job) { jobQueue.splice(i, 1); i--; continue; }
         
+        // Skip jobs where this worker has already failed
+        if (Array.isArray(job.failedWorkers) && job.failedWorkers.includes(workerUrl)) {
+            console.log(`\u2298 Worker ${workerUrl} previously failed job ${jobId}, skipping`);
+            continue;
+        }
+        
         if (job.targetWorker && job.targetWorker !== workerUrl) {
             continue;
         }
@@ -586,7 +592,7 @@ app.post(
     requireWorkerAuth,
     createRateLimiter({ bucket: 'job-update', windowMs: 60 * 1000, max: 180, scope: 'worker' }),
     (req, res) => {
-    const { jobId, status, result, error, output_file_url, output_warning, output_files } = req.body;
+    const { jobId, status, result, error, errorCategory, output_file_url, output_warning, output_files } = req.body;
     const job = jobs.get(jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
@@ -625,7 +631,53 @@ app.post(
             durationMs: job.startedAt ? Date.now() - job.startedAt : null
         });
     } else if (status === 'failed') {
-        markJobFailed(job, error || 'Job failed');
+        // Smart re-queueing: track which workers have failed this job
+        if (!job.failedWorkers) {
+            job.failedWorkers = [];
+        }
+        if (job.assignedWorker && !job.failedWorkers.includes(job.assignedWorker)) {
+            job.failedWorkers.push(job.assignedWorker);
+        }
+
+        const worker = workers.get(job.assignedWorker);
+        const maxRetries = 3;
+        const failedWorkerCount = job.failedWorkers.length;
+        const availableOnlineWorkers = [...workers.values()].filter(w => w.status === 'online' && !job.failedWorkers.includes(w.url)).length;
+
+        // If other workers are available and retries < max, re-queue for a different worker
+        if (availableOnlineWorkers > 0 && job.retries < maxRetries) {
+            console.log(`\n🔄 Retrying job ${jobId} on different worker (failed on ${failedWorkerCount} worker(s))\n`);
+            job.status = 'queued';
+            job.assignedWorker = null;
+            job.retries++;
+            job.lastError = error;
+            job.lastErrorCategory = errorCategory || 'execution_error';
+            jobQueue.unshift(job.id); // Re-queue at front
+            
+            if (worker) {
+                worker.trustScore = Math.max(0, worker.trustScore - 5); // Penalty for failed job
+                worker.jobsFailed++;
+                worker.currentJob = null;
+            }
+            
+            logEvent('job_requeued_different_worker', {
+                jobId,
+                failedWorkerUrl: job.failedWorkers[failedWorkerCount - 1] || 'unknown',
+                failedWorkerCount,
+                retries: job.retries,
+                errorCategory
+            });
+        } else {
+            // No other workers available or max retries reached; mark as permanently failed
+            markJobFailed(job, error || 'Job failed');
+            logEvent('job_permanently_failed', {
+                jobId,
+                failedWorkerCount,
+                retries: job.retries,
+                errorCategory,
+                reason: availableOnlineWorkers === 0 ? 'no_workers_available' : 'max_retries_exceeded'
+            });
+        }
     } else if (status === 'rejected') {
         // Handle worker node dynamically rejecting the 60-second offer
         const worker = workers.get(job.assignedWorker);

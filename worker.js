@@ -85,6 +85,17 @@ function runCommand(command) {
     });
 }
 
+function normalizeLineEndings(filePath) {
+    try {
+        let content = fs.readFileSync(filePath, 'utf8');
+        // Convert CRLF (Windows) to LF (Unix)
+        content = content.replace(/\r\n/g, '\n');
+        fs.writeFileSync(filePath, content, 'utf8');
+    } catch (err) {
+        console.log('⚠️ Could not normalize line endings for', path.basename(filePath));
+    }
+}
+
 function createZipFromDirectory(sourceDir, zipPath) {
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(zipPath);
@@ -198,7 +209,7 @@ async function handleJob(job) {
         if (mode === 'docker-image') {
             await runCommand(`docker pull ${image}`);
             const result = await runCommand(
-                `docker run --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${image}`
+                `docker run --platform linux/amd64 --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${image}`
             );
             stdout = result.stdout;
             stderr = result.stderr;
@@ -280,11 +291,17 @@ CMD ["python", "${entryFile}"]
 
                 console.log('⬇️', fileUrl);
                 await downloadFile(fileUrl, localPath);
+                
+                // Normalize line endings (CRLF → LF) for Python files
+                if (fileName.endsWith('.py')) {
+                    normalizeLineEndings(localPath);
+                    console.log('📝 Normalized line endings:', fileName);
+                }
             }
 
-            // Create Dockerfile for Python environment
+            // Create Dockerfile for Python environment with explicit platform
             const dockerfile = `
-FROM python:3.10
+FROM --platform=linux/amd64 python:3.10
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir pandas numpy scikit-learn matplotlib
@@ -295,12 +312,12 @@ CMD ["python", "${entryFile}"]
 
             const imageName = `python-job-${jobId}`;
 
-            console.log('🔨 Building Python job image...');
-            await runCommand(`docker build -t ${imageName} ${jobsPath}`);
+            console.log('🔨 Building Python job image (linux/amd64)...');
+            await runCommand(`docker build --platform linux/amd64 -t ${imageName} ${jobsPath}`);
 
             console.log('▶️ Running Python job...');
             const result = await runCommand(
-                `docker run --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${imageName}`
+                `docker run --platform linux/amd64 --rm -v "${outputDir}:${CONTAINER_OUTPUT_DIR}" ${imageName}`
             );
 
             stdout = result.stdout;
@@ -367,10 +384,21 @@ CMD ["python", "${entryFile}"]
     } catch (err) {
         console.log('❌ Error:', err.message);
 
+        // Categorize error to help server decide on retry strategy
+        let errorCategory = 'execution_error';
+        if (err.message.includes('exec format error') || err.message.includes('line endings') || err.message.includes('platform')) {
+            errorCategory = 'architecture_mismatch';
+        } else if (err.message.includes('No such file') || err.message.includes('not found')) {
+            errorCategory = 'missing_dependency';
+        } else if (err.message.includes('timeout') || err.message.includes('timed out')) {
+            errorCategory = 'timeout';
+        }
+
         const failedPayload = {
             jobId,
             status: 'failed',
             error: err.message,
+            errorCategory,
             workerUrl
         };
         if (WORKER_SHARED_SECRET) {
