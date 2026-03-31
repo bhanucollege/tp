@@ -99,35 +99,44 @@ function normalizeLineEndings(filePath) {
 function fixCsvPathsInPython(jobsPath, csvFiles) {
     try {
         const pyFiles = fs.readdirSync(jobsPath).filter(f => f.endsWith('.py'));
+        let totalFixed = 0;
+        
         for (const pyFile of pyFiles) {
-            let content = fs.readFileSync(path.join(jobsPath, pyFile), 'utf8');
-            let modified = false;
+            const filePath = path.join(jobsPath, pyFile);
+            let content = fs.readFileSync(filePath, 'utf8');
+            const originalContent = content;
             
-            // Replace relative CSV paths with absolute /app paths
-            for (const csvFile of csvFiles) {
-                const csvFileName = path.basename(csvFile);
-                // Replace 'data.csv', './data.csv', './data.csv', etc. with /app/data.csv
-                content = content.replace(
-                    new RegExp(`['\"]\\.*\\/)?${csvFileName}['\"]`, 'g'),
-                    `'/app/${csvFileName}'`
-                );
-                // Also replace just the filename if it's passed as a variable
-                content = content.replace(
-                    new RegExp(`['\"](\\w*${csvFileName})['\"]`, 'g'),
-                    `'/app/${csvFileName}'`
-                );
-                if (content !== fs.readFileSync(path.join(jobsPath, pyFile), 'utf8')) {
-                    modified = true;
-                }
+            // Simple string replacements for common CSV patterns
+            for (const csvFileName of csvFiles) {
+                const baseName = path.basename(csvFileName);
+                // Escape special regex characters in the filename to avoid regex errors
+                const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                
+                // Replace various CSV path patterns
+                // Single quotes: 'data.csv' -> '/app/data.csv'
+                content = content.replace(new RegExp(`'${escaped}'`, 'g'), `'/app/${baseName}'`);
+                // Double quotes: "data.csv" -> "/app/data.csv"
+                content = content.replace(new RegExp(`"${escaped}"`, 'g'), `"/app/${baseName}"`);
+                // Relative path forms: './data.csv' -> '/app/data.csv'
+                content = content.replace(new RegExp(`'\\.\/${escaped}'`, 'g'), `'/app/${baseName}'`);
+                content = content.replace(new RegExp(`"\\.\\/${escaped}"`, 'g'), `"/app/${baseName}"`);
             }
             
-            if (modified) {
-                fs.writeFileSync(path.join(jobsPath, pyFile), content, 'utf8');
-                console.log('📝 Fixed CSV paths in:', pyFile);
+            // Only write if changed
+            if (content !== originalContent) {
+                fs.writeFileSync(filePath, content, 'utf8');
+                console.log(`📝 Fixed CSV paths in ${pyFile}`);
+                totalFixed++;
             }
         }
+        
+        if (totalFixed > 0) {
+            console.log(`✅ Fixed CSV paths in ${totalFixed} file(s)`);
+        } else {
+            console.log('ℹ️ No CSV paths needed fixing');
+        }
     } catch (err) {
-        console.log('⚠️ Could not fix CSV paths:', err.message);
+        console.error('❌ CSV path fixing failed:', err.stack || err.message);
     }
 }
 
