@@ -379,12 +379,25 @@ CMD ["python", "${entryFile}"]
                 fixCsvPathsInPython(jobsPath, csvFiles);
             }
 
+            // Check if requirements.txt exists
+            const requirementsPath = path.join(jobsPath, 'requirements.txt');
+            const hasRequirements = fs.existsSync(requirementsPath);
+
             // Create Dockerfile for Python environment with explicit platform
+            let pipInstallCmd = '';
+            if (hasRequirements) {
+                console.log('📦 requirements.txt found, using it for dependencies');
+                pipInstallCmd = 'RUN pip install --no-cache-dir -r requirements.txt';
+            } else {
+                console.log('⚠️ No requirements.txt found, installing common ML packages');
+                pipInstallCmd = 'RUN pip install --no-cache-dir pandas numpy scikit-learn matplotlib tensorflow';
+            }
+
             const dockerfile = `
 FROM --platform=linux/amd64 python:3.10
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir pandas numpy scikit-learn matplotlib
+${pipInstallCmd}
 CMD ["python", "${entryFile}"]
 `;
 
